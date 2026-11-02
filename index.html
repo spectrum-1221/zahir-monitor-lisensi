@@ -292,6 +292,10 @@ tbody td{padding:10px 11px;font-size:12px;vertical-align:middle}
 .form-hint{background:var(--info-bg);color:var(--info);border:1px solid rgba(8,145,178,.3);border-radius:10px;padding:12px 14px;font-size:12px;line-height:1.6;margin-bottom:16px;display:none}
 .rev-h{font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin:0 0 10px}
 .rev-note{font-size:11px;color:var(--text3);margin-top:10px;line-height:1.6}
+.rev-fc{display:grid;grid-template-columns:minmax(230px,300px) 1fr;gap:16px;align-items:start}
+.rev-fc-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.rev-fc-chip{font-size:11px;font-weight:600;padding:4px 9px;border-radius:999px;background:rgba(245,158,11,.14);color:var(--text)}
+@media(max-width:760px){.rev-fc{grid-template-columns:1fr}}
 .rev-tbl{min-width:0 !important}
 .rev-tbl td,.rev-tbl th{white-space:nowrap}
 
@@ -902,6 +906,7 @@ mark.sh{background:#fef08a;color:#713f12;border-radius:2px;padding:0 1px}
         </div>
         <div class="card-body">
           <div class="grid-4" id="rev-kpi" style="margin-bottom:22px"></div>
+          <div id="rev-forecast" style="margin-bottom:22px"></div>
           <div class="grid-2" style="gap:24px;margin-bottom:22px">
             <div>
               <div class="rev-h" id="rev-periode-title">Omzet per Bulan</div>
@@ -3555,8 +3560,57 @@ function renderRevenue(){
   document.getElementById('rev-note').innerHTML=
     `Omzet dihitung dari kolom <b>Nilai</b> (dianggap total per registrasi) menurut <b>Tanggal Registrasi</b>. ${nNoVal?`<b>${nNoVal}</b> registrasi belum punya nilai sehingga tidak ikut terhitung. `:''}`
     +`<b>Renewal rate</b> = dari registrasi yang masa aktifnya berakhir pada periode ini, berapa yang sudah punya registrasi lanjutan (customer yang sama, masa aktif lebih panjang; tipe Perbaikan tidak dihitung).`;
+
+  renderRevenueForecast();
 }
 window.renderRevenue=renderRevenue;
+
+// ---- Forecast perpanjangan: registrasi yang masa aktifnya berakhir dari hari ini s/d 2 bulan ke depan ----
+// Tidak bergantung pada filter tahun. Yang sudah kadaluarsa, bertipe Perbaikan, atau sudah punya registrasi lanjutan tidak dihitung.
+function renderRevenueForecast(){
+  const el=document.getElementById('rev-forecast'); if(!el) return;
+  const today=todayISO();
+  const until=addMonthsISO(today,2);
+  const byCust={}; DB.forEach(r=>{ const k=impNormCust(r.nama); (byCust[k]=byCust[k]||[]).push(r); });
+  const renewed=r=>(byCust[impNormCust(r.nama)]||[]).some(s=>s!==r && s.tipe!=='Perbaikan' && s.tglReg && s.tglReg>(r.tglReg||'') && s.tglAktif>r.tglAktif);
+  const items=DB.filter(r=>r.tglAktif && r.tglAktif>=today && r.tglAktif<=until && r.tipe!=='Perbaikan' && !renewed(r))
+    .sort((a,b)=>a.tglAktif.localeCompare(b.tglAktif));
+  const hasVal=r=>typeof r.nilai==='number' && isFinite(r.nilai);
+  const val=r=>hasVal(r)?r.nilai:0;
+  const total=items.reduce((s,r)=>s+val(r),0);
+  const nNoVal=items.filter(r=>!hasVal(r)).length;
+
+  const bln=['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'];
+  const perBln={};
+  items.forEach(r=>{ const k=r.tglAktif.slice(0,7); const o=(perBln[k]=perBln[k]||{n:0,v:0}); o.n++; o.v+=val(r); });
+  const chips=Object.keys(perBln).sort().map(k=>{
+    const [y,m]=k.split('-');
+    const o=perBln[k];
+    return `<span class="rev-fc-chip">${bln[parseInt(m,10)-1]} ${y}: ${o.v?fmtRp(o.v):'–'} (${o.n})</span>`;
+  }).join('');
+
+  const sisa=r=>Math.round((new Date(r.tglAktif+'T00:00:00Z')-new Date(today+'T00:00:00Z'))/86400000);
+  const LIM=15;
+  const rowsHtml=items.length
+    ? items.slice(0,LIM).map(r=>`<tr><td class="td-name">${esc(r.nama)}</td><td>${fmtDate(r.tglAktif)}</td><td style="text-align:center">${sisa(r)} hr</td><td style="text-align:center">${r.lisensi??'–'}</td><td style="text-align:right">${fmtRp(r.nilai)}</td>
+        <td><button class="btn btn-secondary btn-sm" title="Perpanjang" onclick="perpanjang('${r.firestoreId}')">🔄</button></td></tr>`).join('')
+      + (items.length>LIM?`<tr><td colspan="6" style="text-align:center;color:var(--text3)">… ${items.length-LIM} lainnya (lihat menu Segera Habis)</td></tr>`:'')
+    : '<tr><td colspan="6" style="text-align:center;color:var(--text3);padding:18px">Tidak ada registrasi yang akan berakhir dalam 2 bulan ke depan.</td></tr>';
+
+  el.innerHTML=`
+    <div class="rev-h">Forecast Perpanjangan — 2 Bulan ke Depan</div>
+    <div class="rev-fc">
+      <div class="stat-card warn">
+        <div class="stat-label">Total Forecast</div>
+        <div class="stat-value" style="font-size:22px">${fmtRp(total)}</div>
+        <div class="stat-sub">${items.length} registrasi berakhir ${fmtDate(today)} – ${fmtDate(until)}${nNoVal?` · ${nNoVal} belum punya nilai`:''}</div>
+        <div class="rev-fc-chips">${chips}</div>
+      </div>
+      <div class="tbl-wrap"><table class="rev-tbl"><thead><tr><th>Customer</th><th>Berakhir</th><th style="text-align:center">Sisa</th><th style="text-align:center">Lisensi</th><th style="text-align:right">Nilai</th><th></th></tr></thead><tbody>${rowsHtml}</tbody></table></div>
+    </div>
+    <div class="rev-note">Forecast = jumlah <b>Nilai</b> dari registrasi terakhir tiap customer yang masa aktifnya berakhir dalam 2 bulan ke depan, dengan asumsi diperpanjang di nilai yang sama. Yang sudah punya registrasi lanjutan tidak dihitung.</div>`;
+}
+window.renderRevenueForecast=renderRevenueForecast;
 
 // ========== RIWAYAT CUSTOMER PAGE ==========
 function renderHistoryPage(){
