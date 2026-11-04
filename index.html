@@ -836,6 +836,10 @@ mark.sh{background:#fef08a;color:#713f12;border-radius:2px;padding:0 1px}
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
               <input type="text" id="search-input" placeholder="Cari nama, serial, kode reg, invoice, ID komp, catatan..." oninput="filterList()">
             </div>
+            <select id="filter-view" onchange="filterList()" style="min-width:190px" title="Mode tampilan daftar">
+              <option value="customer">👤 Satu baris per customer</option>
+              <option value="all">📄 Semua transaksi</option>
+            </select>
             <select id="filter-paket" onchange="filterList()" style="min-width:150px">
               <option value="">Semua Paket</option>
             </select>
@@ -2714,30 +2718,77 @@ async function saveRecord(){
 window.saveRecord=saveRecord;
 
 // ========== LIST ==========
+function readFilters(){
+  const v=id=>(document.getElementById(id)||{value:''}).value;
+  return {
+    q:v('search-input').toLowerCase().trim(),
+    pkt:v('filter-paket').toLowerCase(),
+    sts:v('filter-status'),
+    tipe:v('filter-tipe'),
+    dari:v('filter-dari'),
+    sampai:v('filter-sampai')
+  };
+}
+function recMatches(r,f,withStatus){
+  if(f.q){
+    // Universal search: cari di SEMUA field yang ada di data
+    const haystack=[
+      r.nama,r.invoice,r.paket,r.tglReg,r.tglAktif,
+      r.idKomp,r.serial,r.code,r.catatan,
+      r.userInput,r.userEmail,r.tipe
+    ].map(v=>(v||'').toLowerCase()).join(' ');
+    if(!haystack.includes(f.q)) return false;
+  }
+  if(f.pkt && !r.paket?.toLowerCase().includes(f.pkt)) return false;
+  if(withStatus && f.sts && getStatus(r.tglAktif)!==f.sts) return false;
+  if(f.tipe && r.tipe!==f.tipe) return false;
+  if(f.dari && r.tglReg && r.tglReg<f.dari) return false;
+  if(f.sampai && r.tglReg && r.tglReg>f.sampai) return false;
+  return true;
+}
+
+// Semua transaksi (satu baris per registrasi). Dipakai juga oleh ekspor CSV.
 function getFilteredData(){
-  const q=(document.getElementById('search-input')||{value:''}).value.toLowerCase().trim();
-  const pkt=(document.getElementById('filter-paket')||{value:''}).value.toLowerCase();
-  const sts=(document.getElementById('filter-status')||{value:''}).value;
-  const dari=(document.getElementById('filter-dari')||{value:''}).value;
-  const sampai=(document.getElementById('filter-sampai')||{value:''}).value;
-  const out=DB.filter(r=>{
-    if(q){
-      // Universal search: cari di SEMUA field yang ada di data
-      const haystack=[
-        r.nama,r.invoice,r.paket,r.tglReg,r.tglAktif,
-        r.idKomp,r.serial,r.code,r.catatan,
-        r.userInput,r.userEmail,r.tipe
-      ].map(v=>(v||'').toLowerCase()).join(' ');
-      if(!haystack.includes(q)) return false;
-    }
-    if(pkt && !r.paket?.toLowerCase().includes(pkt)) return false;
-    if(sts && getStatus(r.tglAktif)!==sts) return false;
-    if((document.getElementById('filter-tipe')||{value:''}).value && r.tipe!==(document.getElementById('filter-tipe')||{value:''}).value) return false;
-    if(dari && r.tglReg && r.tglReg<dari) return false;
-    if(sampai && r.tglReg && r.tglReg>sampai) return false;
-    return true;
+  const f=readFilters();
+  return sortData(DB.filter(r=>recMatches(r,f,true)));
+}
+
+// ----- Satu baris per customer -----
+// Periode terkini = registrasi dengan "Aktif Hingga" paling akhir (Perbaikan tidak menggeser periode).
+function latestOf(list){
+  const main=list.filter(x=>x.tipe!=='Perbaikan');
+  const pool=main.length?main:list;
+  return pool.reduce((a,b)=>{
+    const ta=a.tglAktif||'', tb=b.tglAktif||'';
+    if(tb!==ta) return tb>ta?b:a;
+    return (b.tglReg||'')>(a.tglReg||'')?b:a;
   });
-  return sortData(out);
+}
+function groupByCustomer(list){
+  const g=new Map();
+  list.forEach(r=>{
+    const k=impNormCust(r.nama)||('id:'+r.firestoreId);
+    if(!g.has(k)) g.set(k,[]);
+    g.get(k).push(r);
+  });
+  return g;
+}
+function latestPerCustomer(list){
+  return [...groupByCustomer(list).values()].map(latestOf);
+}
+// Baris daftar: 1 per customer, memakai data periode terkini. Status mengikuti periode terkini;
+// pencarian/paket/tipe/tanggal cocok jika salah satu riwayat customer cocok.
+function getCustomerRows(){
+  const f=readFilters();
+  const rows=[];
+  groupByCustomer(DB).forEach(list=>{
+    const cur=latestOf(list);
+    if(f.sts && getStatus(cur.tglAktif)!==f.sts) return;
+    if(!list.some(r=>recMatches(r,f,false))) return;
+    rows.push({...cur, _count:list.length});
+  });
+  rows.sort((a,b)=>(b.tglReg||'').localeCompare(a.tglReg||''));
+  return sortData(rows);
 }
 
 // Pengurutan daftar (juga dipakai ekspor CSV). Data tanpa tanggal selalu di paling bawah.
@@ -2800,7 +2851,8 @@ function tipeBadge(tipe){
 }
 
 function renderList(){
-  filteredData=getFilteredData();
+  const customerView=((document.getElementById('filter-view')||{}).value||'customer')==='customer';
+  filteredData=customerView?getCustomerRows():getFilteredData();
   const total=filteredData.length;
   const pages=Math.ceil(total/pageSize)||1;
   if(currentPage>pages) currentPage=pages;
@@ -2825,7 +2877,8 @@ function renderList(){
         x.nama?.toLowerCase()===r.nama?.toLowerCase() &&
         x.serial===r.serial
       ).length : 0;
-      const hasHistory = histCount > 1;
+      const hasHistory = !customerView && histCount > 1;
+      const nPeriode = customerView ? (r._count||1) : 1;
 
       const escA = (s) => (s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
       const escJ = (s) => (s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n');
@@ -2848,7 +2901,7 @@ function renderList(){
 
       return `<tr>
       <td class="col-no" style="color:var(--text3);font-size:12px">${(currentPage-1)*pageSize+i+1}</td>
-      <td class="col-nama td-name">${hl(r.nama)}</td>
+      <td class="col-nama td-name">${hl(r.nama)}${nPeriode>1?`<div><span class="badge badge-blue" style="cursor:pointer;font-size:10px;margin-top:4px" title="Lihat riwayat semua periode" onclick="openCustomerHistory('${r.firestoreId}')">🔄 ${nPeriode} periode</span></div>`:''}</td>
       <td class="col-invoice" style="font-size:12px">${hl(r.invoice||'–')}</td>
       <td class="col-paket">${(r.paket||'–').split(',').map(p=>`<span class="badge badge-blue" style="margin:1px;font-size:10px">${q?highlightText(p.trim(),q):p.trim()}</span>`).join(' ')}</td>
       <td class="col-tipe">${tipeBadge(r.tipe)}</td>
@@ -2872,6 +2925,10 @@ function renderList(){
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
             Perpanjang
           </button>
+          ${nPeriode>1?`<button class="aksi-btn history" onclick="openCustomerHistory('${r.firestoreId}')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            Periode (${nPeriode})
+          </button>`:''}
           <button class="aksi-btn edit" onclick="openEdit('${r.firestoreId}')">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
             Edit
@@ -2899,7 +2956,7 @@ function renderList(){
   }
   const ind=document.getElementById('sort-ind');
   if(ind){ const m=(document.getElementById('filter-sort')||{}).value; ind.textContent = (m==='aktif-asc'||m==='segera')?'▲':m==='aktif-desc'?'▼':'⇅'; }
-  document.getElementById('row-info').textContent=`Menampilkan ${slice.length} dari ${total} data`;
+  document.getElementById('row-info').textContent=`Menampilkan ${slice.length} dari ${total} ${customerView?'customer':'data'}`;
   renderPagination(pages);
 }
 
@@ -3056,6 +3113,65 @@ function closeHistory(){
 window.openHistory=openHistory;
 window.closeHistory=closeHistory;
 window.toggleSerialGroup=toggleSerialGroup;
+
+// ========== RIWAYAT PERIODE PER CUSTOMER ==========
+function openCustomerHistory(fid){
+  const base=DB.find(x=>x.firestoreId===fid); if(!base) return;
+  const key=impNormCust(base.nama);
+  const all=DB.filter(x=>impNormCust(x.nama)===key)
+    .sort((a,b)=>(b.tglAktif||'').localeCompare(a.tglAktif||'')||(b.tglReg||'').localeCompare(a.tglReg||''));
+  const cur=latestOf(all);
+  const hasVal=r=>typeof r.nilai==='number' && isFinite(r.nilai);
+  const total=all.reduce((s,r)=>s+(hasVal(r)?r.nilai:0),0);
+  const awal=all.map(r=>r.tglReg).filter(Boolean).sort()[0];
+  const superseded=r=>r.tipe!=='Perbaikan' && all.some(s=>s!==r && s.tipe!=='Perbaikan' && (s.tglAktif||'')>(r.tglAktif||''));
+
+  document.getElementById('history-title').textContent=`📜 Riwayat Periode: ${cur.nama||base.nama}`;
+  document.getElementById('history-subtitle').textContent=`${all.length} registrasi · customer sejak ${awal?fmtDate(awal):'–'}`;
+
+  const th='padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;white-space:nowrap';
+  const td='padding:8px 10px;vertical-align:top;font-size:12px';
+  const rows=all.map(r=>{
+    const isCur=r===cur;
+    let st;
+    if(r.tipe==='Perbaikan') st='<span class="badge badge-gray">–</span>';
+    else if(!isCur && superseded(r)) st='<span class="badge badge-gray">↻ Sudah diperpanjang</span>';
+    else st=statusBadge(getStatus(r.tglAktif));
+    return `<tr style="border-bottom:1px solid var(--border);${isCur?'background:var(--surface2)':''}">
+      <td style="${td}"><b>${fmtDate(r.tglReg)}</b> → ${fmtDate(r.tglAktif)}${isCur?'<br><span style="background:var(--success-bg);color:var(--success);padding:1px 6px;border-radius:10px;font-size:9px;font-weight:700">● PERIODE TERKINI</span>':''}</td>
+      <td style="${td}">${tipeBadge(r.tipe)}</td>
+      <td style="${td}">${esc(r.paket||'–')}</td>
+      <td style="${td};text-align:center">${r.lisensi??'–'}</td>
+      <td style="${td};text-align:right;white-space:nowrap">${fmtRp(r.nilai)}</td>
+      <td style="${td}">${esc(r.invoice||'–')}</td>
+      <td style="${td}">${st}</td>
+      <td style="${td};white-space:nowrap">
+        ${isCur?`<button class="btn btn-secondary btn-sm" title="Perpanjang" onclick="closeHistory();perpanjang('${r.firestoreId}')">🔄</button>`:''}
+        <button class="btn btn-secondary btn-sm" title="Edit" onclick="closeHistory();openEdit('${r.firestoreId}')">✏</button>
+        <button class="btn btn-secondary btn-sm" title="Cetak" onclick="printItem('${r.firestoreId}')">🖨</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('history-body').innerHTML=`
+    <div class="history-summary">
+      <div class="history-summary-card"><div class="val">${all.length}</div><div class="lbl">Total Registrasi</div></div>
+      <div class="history-summary-card"><div class="val" style="font-size:16px">${statusBadge(getStatus(cur.tglAktif))}</div><div class="lbl">Status Saat Ini</div></div>
+      <div class="history-summary-card"><div class="val" style="font-size:16px">${fmtRp(total)}</div><div class="lbl">Total Nilai</div></div>
+    </div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse">
+        <thead><tr style="background:var(--surface2)">
+          <th style="${th}">Periode</th><th style="${th}">Tipe</th><th style="${th}">Paket</th>
+          <th style="${th};text-align:center">Lisensi</th><th style="${th};text-align:right">Nilai</th>
+          <th style="${th}">Invoice</th><th style="${th}">Status</th><th style="${th}"></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  document.getElementById('modal-history').classList.add('open');
+}
+window.openCustomerHistory=openCustomerHistory;
 
 // ========== HELPER DATETIME ==========
 function fmtDatetime(d){
@@ -3366,12 +3482,14 @@ window.printItem=printItem;
 function renderDashboard(){
   if(!DB.length) return;
   const now=new Date(); now.setHours(0,0,0,0);
-  const active=DB.filter(r=>getStatus(r.tglAktif)==='active').length;
-  const expiring=DB.filter(r=>getStatus(r.tglAktif)==='expiring').length;
-  const expired=DB.filter(r=>getStatus(r.tglAktif)==='expired').length;
+  // Status dihitung per customer (periode terkini), supaya registrasi lama yang sudah diperpanjang tidak ikut terhitung
+  const cur=latestPerCustomer(DB);
+  const active=cur.filter(r=>getStatus(r.tglAktif)==='active').length;
+  const expiring=cur.filter(r=>getStatus(r.tglAktif)==='expiring').length;
+  const expired=cur.filter(r=>getStatus(r.tglAktif)==='expired').length;
   document.getElementById('stat-grid').innerHTML=`
-    <div class="stat-card"><div class="stat-label">Total Registrasi</div><div class="stat-value" style="color:var(--primary)">${DB.length}</div><div class="stat-sub">Semua data plugin</div></div>
-    <div class="stat-card"><div class="stat-label">Status Aktif</div><div class="stat-value" style="color:var(--success)">${active}</div><div class="stat-sub">${Math.round(active/DB.length*100)}% dari total</div></div>
+    <div class="stat-card"><div class="stat-label">Total Customer</div><div class="stat-value" style="color:var(--primary)">${cur.length}</div><div class="stat-sub">${DB.length} registrasi tercatat</div></div>
+    <div class="stat-card"><div class="stat-label">Status Aktif</div><div class="stat-value" style="color:var(--success)">${active}</div><div class="stat-sub">${Math.round(active/cur.length*100)}% dari customer</div></div>
     <div class="stat-card"><div class="stat-label">Segera Habis (≤30hr)</div><div class="stat-value" style="color:var(--warn)">${expiring}</div><div class="stat-sub">Perlu perpanjangan</div></div>
     <div class="stat-card"><div class="stat-label">Kadaluarsa</div><div class="stat-value" style="color:var(--danger)">${expired}</div><div class="stat-sub">Plugin tidak aktif</div></div>`;
 
@@ -3397,7 +3515,7 @@ function renderDashboard(){
     '<div class="chart-bar-wrap">'+uSorted.map(([k,v])=>`<div class="chart-bar-row"><div class="chart-bar-label" title="${k}">${k}</div><div class="chart-bar-track"><div class="chart-bar-fill" style="width:${Math.round(v/maxU*100)}%;background:#7c3aed"></div></div><div class="chart-bar-val">${v}</div></div>`).join('')+'</div>':
     '<p style="color:var(--text3);text-align:center;padding:16px">Belum ada data user</p>';
 
-  const soon=DB.filter(r=>{ const d=daysLeft(r.tglAktif); return d!==null&&d>=0&&d<=30; }).sort((a,b)=>a.tglAktif?.localeCompare(b.tglAktif)).slice(0,5);
+  const soon=cur.filter(r=>{ const d=daysLeft(r.tglAktif); return d!==null&&d>=0&&d<=30; }).sort((a,b)=>a.tglAktif?.localeCompare(b.tglAktif)).slice(0,5);
   document.getElementById('expiring-widget').innerHTML=soon.length?
     soon.map(r=>`<div style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;background:var(--surface2);border:1px solid var(--border);margin-bottom:6px">
       <div style="flex:1"><div style="font-weight:600;font-size:12px">${esc(r.nama)}</div><div style="font-size:11px;color:var(--text2);margin-top:2px">${r.paket} · ${fmtDate(r.tglAktif)}</div></div>
@@ -3709,7 +3827,7 @@ window.renderHistoryPage=renderHistoryPage;
 // ========== EXPIRING ==========
 function renderExpiringPage(){
   const days=parseInt(document.getElementById('exp-days')?.value||30);
-  const list=DB.filter(r=>{ const d=daysLeft(r.tglAktif); return d!==null&&d>=0&&d<=days; }).sort((a,b)=>a.tglAktif?.localeCompare(b.tglAktif));
+  const list=latestPerCustomer(DB).filter(r=>{ const d=daysLeft(r.tglAktif); return d!==null&&d>=0&&d<=days; }).sort((a,b)=>a.tglAktif?.localeCompare(b.tglAktif));
   const tbody=document.getElementById('exp-body');
   tbody.innerHTML=list.length?list.map((r,i)=>{
     const d=daysLeft(r.tglAktif);
